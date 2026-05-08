@@ -1,6 +1,11 @@
-"""Add the talklikeachipmunk.com URL to the poster and save a print-ready copy."""
+"""Add the talklikeachipmunk.com URL to the poster and save a print-ready copy.
+
+The URL is rendered in the same multi-coloured outlined style as the title
+(orange / yellow / green / blue / purple), so it reads as part of the artwork
+rather than a separate sticker.
+"""
 from pathlib import Path
-from PIL import Image, ImageDraw, ImageFont
+from PIL import Image, ImageDraw, ImageFilter, ImageFont
 
 ROOT = Path(__file__).resolve().parent.parent
 SRC = ROOT / "assets" / "Talk like a chipmunk sign.png"
@@ -8,94 +13,144 @@ DST = ROOT / "assets" / "Talk like a chipmunk poster.png"
 
 URL_TEXT = "talklikeachipmunk.com"
 
-INK = (42, 42, 58, 255)        # dark navy
-YELLOW = (255, 204, 51, 255)   # banner fill
-ORANGE = (255, 122, 61, 255)   # accent
-WHITE = (255, 255, 255, 255)
+# Colours sampled from the title in the original artwork
+INK = (42, 42, 58)
+PALETTE = [
+    (255, 122, 61),   # orange
+    (255, 204, 51),   # yellow
+    (108, 194, 74),   # green
+    (52, 182, 228),   # blue
+    (139, 92, 246),   # purple
+]
 
 FONT_CANDIDATES = [
-    "/System/Library/Fonts/Supplemental/Chalkboard SE.ttc",
-    "/System/Library/Fonts/Supplemental/Comic Sans MS Bold.ttf",
-    "/System/Library/Fonts/Supplemental/Impact.ttf",
-    "/System/Library/Fonts/Supplemental/Arial Bold.ttf",
+    # (path, ttc_index_or_None) — heaviest, roundest first
+    ("/System/Library/Fonts/Supplemental/Comic Sans MS Bold.ttf", None),
+    ("/System/Library/Fonts/Supplemental/Chalkboard SE.ttc", 1),
+    ("/System/Library/Fonts/Supplemental/Impact.ttf", None),
 ]
 
 
 def load_font(size: int) -> ImageFont.FreeTypeFont:
-    for path in FONT_CANDIDATES:
+    for path, idx in FONT_CANDIDATES:
         if Path(path).exists():
             try:
-                # ttc files: Chalkboard SE has Bold at index 1
-                if path.endswith(".ttc"):
-                    return ImageFont.truetype(path, size, index=1)
+                if idx is not None:
+                    return ImageFont.truetype(path, size, index=idx)
                 return ImageFont.truetype(path, size)
             except OSError:
                 continue
     return ImageFont.load_default()
 
 
+def color_for(ch: str, idx: int) -> tuple[int, int, int]:
+    """Pick a palette colour, but skip yellow for the dot so it stays legible."""
+    color = PALETTE[idx % len(PALETTE)]
+    if ch == "." and color == PALETTE[1]:
+        return PALETTE[0]
+    return color
+
+
+def measure(draw: ImageDraw.ImageDraw, text: str, font: ImageFont.FreeTypeFont,
+            stroke: int) -> tuple[int, int, int]:
+    """Return (total visual width, max ascent above baseline, max descent below).
+
+    Letters are drawn at consecutive pen positions; their outline strokes overlap
+    cleanly between neighbours since they share the same stroke colour. The
+    visual width is therefore the sum of glyph advances plus one stroke of
+    padding at each end of the word.
+    """
+    ascent = descent = 0
+    width = 0
+    for ch in text:
+        bbox = draw.textbbox((0, 0), ch, font=font, stroke_width=stroke,
+                             anchor="ls")
+        ascent = max(ascent, -bbox[1])
+        descent = max(descent, bbox[3])
+        width += int(draw.textlength(ch, font=font))
+    return width + 2 * stroke, ascent, descent
+
+
 def main() -> None:
     src = Image.open(SRC).convert("RGBA")
     w, h = src.size
 
-    band_h = 300
-    new = Image.new("RGBA", (w, h + band_h), WHITE)
-    new.paste(src, (0, 0), src)
+    # Extra space at the bottom for the URL band
+    band_h = 320
+    canvas = Image.new("RGBA", (w, h + band_h), (255, 255, 255, 255))
+    canvas.paste(src, (0, 0), src)
 
-    draw = ImageDraw.Draw(new)
+    # We render the URL at a generous size, auto-shrinking until it fits with margins
+    side_margin = 110
+    max_width = w - 2 * side_margin
+    stroke = 14
+    font_size = 230
 
-    # Banner pill centered in the new strip — sized to fit comfortably with margins
-    pad_x, pad_y = 70, 28
-    side_margin = 120
-    max_text_width = w - 2 * side_margin - 2 * pad_x
-    font_size = 200
+    draw = ImageDraw.Draw(canvas)
     while font_size > 60:
         font = load_font(font_size)
-        bbox = draw.textbbox((0, 0), URL_TEXT, font=font)
-        if (bbox[2] - bbox[0]) <= max_text_width:
+        tw, ascent, descent = measure(draw, URL_TEXT, font, stroke)
+        if tw <= max_width:
             break
-        font_size -= 4
-    tw, th = bbox[2] - bbox[0], bbox[3] - bbox[1]
+        font_size -= 6
 
-    pill_w = tw + pad_x * 2
-    pill_h = th + pad_y * 2
-    pill_x0 = (w - pill_w) // 2
-    pill_y0 = h + (band_h - pill_h) // 2
-    pill_x1 = pill_x0 + pill_w
-    pill_y1 = pill_y0 + pill_h
-    radius = pill_h // 2
+    # Vertical placement: centre the cap-height inside the band
+    band_top = h
+    band_center_y = band_top + band_h // 2
+    baseline_y = band_center_y + (ascent - descent) // 2
 
-    # Drop shadow
-    shadow_offset = 12
-    draw.rounded_rectangle(
-        [pill_x0 + shadow_offset, pill_y0 + shadow_offset,
-         pill_x1 + shadow_offset, pill_y1 + shadow_offset],
-        radius=radius, fill=(0, 0, 0, 60),
-    )
+    # First letter's left outline starts at the visual-left edge of the word
+    word_left = (w - tw) // 2
+    pen_start = word_left + stroke
 
-    # Outlined yellow pill
-    draw.rounded_rectangle(
-        [pill_x0, pill_y0, pill_x1, pill_y1],
-        radius=radius, fill=YELLOW, outline=INK, width=10,
-    )
+    # --- Soft drop shadow under the whole word (single pass, blurred) ---
+    shadow_layer = Image.new("RGBA", canvas.size, (0, 0, 0, 0))
+    sdraw = ImageDraw.Draw(shadow_layer)
+    x_cursor = pen_start
+    for i, ch in enumerate(URL_TEXT):
+        sdraw.text((x_cursor + 8, baseline_y + 10), ch, font=font,
+                   fill=(0, 0, 0, 110), stroke_width=stroke,
+                   stroke_fill=(0, 0, 0, 110), anchor="ls")
+        x_cursor += int(draw.textlength(ch, font=font))
+    shadow_layer = shadow_layer.filter(ImageFilter.GaussianBlur(6))
+    canvas.alpha_composite(shadow_layer)
 
-    # URL text centered in pill
-    text_x = pill_x0 + (pill_w - tw) // 2 - bbox[0]
-    text_y = pill_y0 + (pill_h - th) // 2 - bbox[1]
-    draw.text((text_x, text_y), URL_TEXT, font=font, fill=INK)
+    # --- The actual letters: outlined, alternating palette colours ---
+    x_cursor = pen_start
+    color_idx = 0
+    for ch in URL_TEXT:
+        if ch == ".":
+            fill = INK
+        else:
+            fill = color_for(ch, color_idx)
+            color_idx += 1
+        draw.text((x_cursor, baseline_y), ch, font=font, fill=fill,
+                  stroke_width=stroke, stroke_fill=INK, anchor="ls")
+        x_cursor += int(draw.textlength(ch, font=font))
 
-    # Tiny accent dots on each side of the pill
-    dot_r = 14
-    cy = (pill_y0 + pill_y1) // 2
-    for dx in (-60, -30):
-        draw.ellipse([pill_x0 + dx - dot_r, cy - dot_r,
-                      pill_x0 + dx + dot_r, cy + dot_r], fill=ORANGE)
-    for dx in (30, 60):
-        draw.ellipse([pill_x1 + dx - dot_r, cy - dot_r,
-                      pill_x1 + dx + dot_r, cy + dot_r], fill=ORANGE)
+    # --- Decorative stars on either side of the URL, like the confetti above ---
+    star_y = band_center_y
+    for cx, color in [
+        (word_left - 60, PALETTE[2]),
+        (word_left + tw + 60, PALETTE[0]),
+    ]:
+        draw_star(draw, cx, star_y, r=32, fill=color, outline=INK, width=8)
 
-    new.convert("RGB").save(DST, "PNG", optimize=True)
-    print(f"Wrote {DST} ({new.size[0]}x{new.size[1]})")
+    canvas.convert("RGB").save(DST, "PNG", optimize=True)
+    print(f"Wrote {DST} ({canvas.size[0]}x{canvas.size[1]}) at font size {font_size}")
+
+
+def draw_star(draw: ImageDraw.ImageDraw, cx: int, cy: int, r: int,
+              fill, outline, width: int) -> None:
+    """Draw a chunky 5-point star centred on (cx, cy)."""
+    import math
+    points = []
+    for i in range(10):
+        angle = -math.pi / 2 + i * math.pi / 5
+        radius = r if i % 2 == 0 else r * 0.45
+        points.append((cx + radius * math.cos(angle),
+                       cy + radius * math.sin(angle)))
+    draw.polygon(points, fill=fill, outline=outline, width=width)
 
 
 if __name__ == "__main__":
